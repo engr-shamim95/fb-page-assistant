@@ -165,9 +165,9 @@ def verify_webhook():
         return challenge, 200
     return "Forbidden", 403
 
-def process_message(sender_id, user_message, image_urls):
+def process_message(sender_id, user_message, image_urls, audio_urls=None):
     """Background task to get AI response and send it to avoid timeout."""
-    ai_response_text = get_ai_response(sender_id, user_message, image_urls)
+    ai_response_text = get_ai_response(sender_id, user_message, image_urls, audio_urls)
     send_message(sender_id, ai_response_text)
 
 @app.route("/webhook", methods=["POST"])
@@ -216,18 +216,21 @@ def webhook():
                     continue
                 
                 image_urls = []
+                audio_urls = []
                 
-                # Check for image attachments
+                # Check for image and audio attachments
                 if "attachments" in message:
                     for attachment in message["attachments"]:
                         if attachment.get("type") == "image":
                             image_urls.append(attachment["payload"]["url"])
+                        elif attachment.get("type") == "audio" or attachment.get("type") == "video":
+                            audio_urls.append(attachment["payload"]["url"])
                 
-                if user_message or image_urls:
-                    print(f"Received from {user_id}: Text: '{user_message}', Images: {len(image_urls)}")
+                if user_message or image_urls or audio_urls:
+                    print(f"Received from {user_id}: Text: '{user_message}', Images: {len(image_urls)}, Audio: {len(audio_urls)}")
                     
                     # Run AI and messaging tasks in a background thread
-                    thread = threading.Thread(target=process_message, args=(user_id, user_message, image_urls))
+                    thread = threading.Thread(target=process_message, args=(user_id, user_message, image_urls, audio_urls))
                     thread.start()
                     
     # Return 200 OK immediately so Facebook stops retrying
@@ -679,7 +682,7 @@ def broadcast():
     """
     return render_template_string(html, total=total_customers)
 
-def get_ai_response(sender_id, text, image_urls):
+def get_ai_response(sender_id, text, image_urls, audio_urls=None):
     try:
         # 1. Fetch live stock from database
         conn = sqlite3.connect("orders.db")
@@ -717,9 +720,22 @@ def get_ai_response(sender_id, text, image_urls):
             if img_response.status_code == 200:
                 img = Image.open(BytesIO(img_response.content))
                 message_parts.append(img)
+                
+        # Process audio (Inline Data)
+        if audio_urls:
+            for url in audio_urls:
+                audio_resp = requests.get(url)
+                if audio_resp.status_code == 200:
+                    # Pass as inline data to bypass discovery API limitations
+                    message_parts.append({
+                        "mime_type": "audio/mp4",
+                        "data": audio_resp.content
+                    })
         
-        if not text and image_urls:
+        if not text and image_urls and not audio_urls:
             message_parts.append("এই ছবিটি দেখে বলো এই ডিজাইনটি কেমন এবং 'কারুশিল্প' পেইজের হাতের কাজের সাথে এটি কীভাবে মিলে যায়।")
+        if not text and audio_urls and not image_urls:
+            message_parts.append("কাস্টমার একটি ভয়েস মেসেজ পাঠিয়েছে। অডিওটি শুনে কাস্টমারের কথার সুন্দরভাবে বাংলায় উত্তর দাও।")
             
         if not message_parts:
             return "আমি আপনার মেসেজটি বুঝতে পারিনি।"
@@ -727,6 +743,8 @@ def get_ai_response(sender_id, text, image_urls):
         # Send message to Gemini and get response
         response = chat.send_message(message_parts)
         response_text = response.text
+        
+
         
         # After sending message, save the updated history to DB
         save_history(sender_id, chat)
